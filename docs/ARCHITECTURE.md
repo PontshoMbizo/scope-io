@@ -182,6 +182,7 @@ Plot (analog). Renders the server-supplied `testResult` — no grading here.
 | `Problems/{id}` | `{ title, description, difficulty, topics[], testType, sampleCount, timeStep, testbench, creatorId, createdAt }` | Top-level problem metadata |
 | `Problems/{id}/initialCircuit/data` | `{ payload: string }` | Starting circuit netlist |
 | `Problems/{id}/solutionWaveform/{testKey}` | `{ samples: string, sampleRate: number }` | Golden output per test (`test1`–`test3`). `samples` is newline-delimited decimals. |
+| `Problems/{id}/private/reference` | `{ simulatorType, code }` | fulgurlab / fulgurspice reference design. No client reads (rules); see [FULGUR-SIMULATORS.md](FULGUR-SIMULATORS.md) |
 | `Users/{uid}` | `{ uid, email, displayName, role, createdAt }` | Written by `authUtils.syncUserDocument()` on first sign-in |
 | `UserProgress/{uid}_{problemId}` | `{ userId, problemId, status:"completed", completedAt, score }` | Lightweight progress index |
 

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
 import LoadingAnimation from "@/components/LoadingAnimation";
 import { useAuth } from "@/components/Auth/AuthProvider";
+import { gradePayload } from "@/lib/simulators";
 
 // ssr: false because Chart.js requires a browser environment
 const Results = dynamic(() => import("./Results"), {
@@ -11,15 +12,10 @@ const Results = dynamic(() => import("./Results"), {
   loading: () => <LoadingAnimation />
 });
 
-// Shape an analog capture into the request payload the grade API expects.
-// topics / testType / testbench are intentionally omitted — the server reads
-// them from the problem document so a client can't substitute lenient values.
-const buildAnalogPayload = (data) => ({
-  output: data.data?.output || [],
-  input: data.data?.input || [],
-  timeLabels: data.timeLabels,
-  sampleRate: data.sampleRate,
-});
+// Request payloads come from lib/simulators#gradePayload, one shape per
+// simulator. topics / testType / testbench are intentionally never sent — the
+// server reads them from the problem document so a client can't substitute
+// lenient values.
 
 export default function AutoMarker({
   onBack,
@@ -47,11 +43,7 @@ export default function AutoMarker({
   // one capture; throws on a server error so callers can decide whether to
   // continue (load sweep) or surface it (single submit).
   const gradeOne = useCallback(async (testKey, data) => {
-    const capturedPayload = simulatorType !== "circuitjs"
-      ? { changes: data.changes }
-      : testType === "digital"
-        ? { table: data.table }
-        : buildAnalogPayload(data);
+    const capturedPayload = gradePayload(simulatorType, testType, data);
 
     // Send the Firebase ID token — server extracts uid from it, never trusts body.
     const token = await user?.getIdToken?.() || null;
@@ -85,7 +77,7 @@ export default function AutoMarker({
   const gradeBatch = useCallback(async (tests) => {
     const captures = {};
     for (const key of ["test1", "test2", "test3"]) {
-      if (tests[key]) captures[key] = buildAnalogPayload(tests[key]);
+      if (tests[key]) captures[key] = gradePayload(simulatorType, testType, tests[key]);
     }
 
     const token = await user?.getIdToken?.() || null;
@@ -127,7 +119,7 @@ export default function AutoMarker({
       setRunError(errorLines.join("\n"));
     }
     if (isCompleted) onCompleted?.();
-  }, [problemId, user, setTestSuite, onCompleted, gradeOne]);
+  }, [problemId, user, setTestSuite, onCompleted, gradeOne, simulatorType, testType]);
 
   // Single-capture grade (signal/digital, or one tab).
   const gradeTest = useCallback(async (testKey, data) => {

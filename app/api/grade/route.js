@@ -3,24 +3,25 @@ import { adminDb, adminAuth, FieldValue } from "@/lib/firebaseAdmin";
 import { db } from "@/lib/firebase";
 import { doc, getDoc, collection, getDocs } from "firebase/firestore";
 import { gradingUtils } from "@/lib/gradingUtils";
-import { signalUtils } from "@/lib/signalUtils";
-import { decodeWaveform, decimate } from "@/lib/waveformCodec";
+import { getSimulator } from "@/lib/simulators";
+import { gradeAnalogCapture, gradeContinuousCapture, resimulateFulgurlab } from "@/lib/captureGrading";
 
 // firebase-admin requires the Node.js runtime — never let this route be
 // promoted to the Edge runtime.
 export const runtime = "nodejs";
+// fulgurlab problems re-simulate the submission on the fulgurlab server
+// (usually well under a second, capped at 25 s below).
+export const maxDuration = 30;
 
-// Hard caps so a hostile payload can't make the FFT/NRMSE loops chew CPU.
-const MAX_ANALOG_SAMPLES = 200_000;
+
+// Hard caps so a hostile payload can't make the FFT/NRMSE loops chew CPU
+// (the analog caps live with the analog grader in lib/captureGrading.js).
 const MAX_DIGITAL_ROWS = 10_000;
 // A batched load submission carries up to three captures in one body. Cap the
 // combined sample count so an oversized batch is rejected (413) rather than
 // chewing CPU or tripping the platform body limit — the client then falls back
 // to grading each load in a separate request.
 const MAX_BATCH_SAMPLES = 1_200_000;
-// Allowed relative drift between the user's capture rate and the stored
-// solution rate before we refuse to compare waveforms sample-by-sample.
-const SAMPLE_RATE_TOLERANCE = 0.05;
 
 // In-memory sliding-window rate limiter, keyed by verified uid or client IP.
 // Resets on server restart. On serverless (Vercel) this is per-instance and
@@ -122,160 +123,6 @@ async function _fetchProblemAndSolutionsUncached(problemId) {
   return { problem: pSnap.data(), solutions };
 }
 
-// Validate + grade a single analog (load/signal) capture against its golden.
-// Returns { ok: true, testResult, passed } or { ok: false, status, error }.
-// This is the analog half of the trust boundary — both the single-test path
-// and the batched load-sweep path run every capture through it, so validation
-// (shape, size, sample rate, dead output) and grading live in exactly one place.
-function gradeAnalogCapture({ problem, testType, testbench, topics, solutionsMap, testKey, capturedData }) {
-  if (!capturedData || !Array.isArray(capturedData.output) || !Array.isArray(capturedData.input)) {
-    return { ok: false, status: 400, error: "capturedData.output and .input must be arrays for analog problems" };
-  }
-  if (capturedData.output.length > MAX_ANALOG_SAMPLES || capturedData.input.length > MAX_ANALOG_SAMPLES) {
-    return { ok: false, status: 400, error: `capturedData arrays exceed the maximum of ${MAX_ANALOG_SAMPLES} samples` };
-  }
-  const allFinite = (arr) => arr.every(v => typeof v === "number" && isFinite(v));
-  if (!allFinite(capturedData.output) || !allFinite(capturedData.input)) {
-    return { ok: false, status: 400, error: "capturedData arrays must contain only finite numbers" };
-  }
-
-  const { output: userVout = [], input: userVin = [], timeLabels = [], sampleRate = 1 } = capturedData;
-  const resistanceMap = {
-    test1: testbench.noload || 1e12,
-    test2: testbench.maxload || 1,
-    test3: testbench.minload || 1,
-  };
-  const activeResistance = Number(resistanceMap[testKey]);
-  const solKey = testType === "signal" ? "test1" : testKey;
-  const solutionDoc = solutionsMap[solKey] || {};
-  // Decode the golden (packed "f32:" form or legacy newline text — handled
-  // transparently). The golden may be stored decimated; `decimation` is the
-  // stored stride (1 for legacy/undecimated docs).
-  const solOutData = decodeWaveform(solutionDoc.samples || "");
-  const D = Math.max(1, Math.floor(Number(solutionDoc.decimation) || 1));
-
-  if (solOutData.length === 0) {
-    console.error(`[grade] Empty solution data for key ${solKey}`);
-    return { ok: false, status: 500, error: "Solution data is missing or malformed. Contact the problem creator." };
-  }
-
-  // Decimate the user capture by the same stride so we compare like-for-like
-  // against the (possibly decimated) golden. D=1 → no-op (legacy behavior).
-  const userVoutDec = decimate(userVout, D);
-  const userVinDec = decimate(userVin, D);
-
-  // A submission shorter than the solution would only be compared over its own
-  // length — matching the first N samples would be enough to pass. Require a
-  // full-length capture (expressed in full-resolution samples for the user).
-  if (userVoutDec.length < solOutData.length) {
-    return {
-      ok: false,
-      status: 400,
-      error: `Capture too short: got ${userVout.length} samples, expected at least ${solOutData.length * D}. Reset the simulator and capture the full window.`,
-    };
-  }
-
-  // Comparing sample-by-sample is meaningless if the user's simulator runs at a
-  // different time step than the one the solution was captured with. The rate
-  // check uses the user's *full* capture rate against the problem's declared
-  // step / the golden's stored (full) rate — decimation doesn't change it.
-  const userRate = Number(sampleRate);
-  const declaredStep = Number(problem.timeStep);
-  const declaredRate = declaredStep > 0 ? 1 / declaredStep : NaN;
-  const storedRate = Number(solutionDoc.sampleRate);
-  const within = (ref) =>
-    isFinite(ref) && ref > 0 && Math.abs(userRate - ref) / ref <= SAMPLE_RATE_TOLERANCE;
-  const haveReference =
-    (isFinite(declaredRate) && declaredRate > 0) || (isFinite(storedRate) && storedRate > 0);
-  if (isFinite(userRate) && userRate > 0 && haveReference) {
-    if (!within(declaredRate) && !within(storedRate)) {
-      console.warn(`[grade] Rate mismatch for ${testKey}: userRate=${userRate}, declaredRate=${declaredRate}, storedRate=${storedRate}`);
-      return {
-        ok: false,
-        status: 400,
-        error: "Simulation time step doesn't match this problem's reference. Reset the circuit template (which restores the correct time step) and capture again.",
-      };
-    }
-  }
-
-  // Align lengths after decimation so the NRMSE/FFT compare like-for-like (and
-  // so getFrequencyData's vin.length === vout.length precondition always holds,
-  // even when the user captured a few samples more than the golden).
-  const m = Math.min(userVoutDec.length, solOutData.length);
-  const uOut = userVoutDec.slice(0, m);
-  const uIn = userVinDec.slice(0, m);
-  const sOut = solOutData.slice(0, m);
-  const labels = decimate(timeLabels, D).slice(0, m);
-  // Spectral frequencies scale with the decimated rate.
-  const effectiveRate = userRate / D;
-
-  // Reject obviously-miswired captures (floating output / probe on the wrong
-  // node / open circuit) with an actionable message rather than an opaque NRMSE
-  // miss. Does not fire when the golden is itself flat (legitimate DC problems).
-  if (gradingUtils.isDeadOutput(uOut, sOut)) {
-    return {
-      ok: false,
-      status: 400,
-      error: "Output never changed — check that the voltmeter is across the output node and the circuit isn't floating or open.",
-    };
-  }
-
-  const targetBode = signalUtils.getFrequencyData(uIn, sOut, effectiveRate);
-  const userBode = signalUtils.getFrequencyData(uIn, uOut, effectiveRate);
-
-  // Hybrid analog grade: 70% time-domain NRMSE, 20% frequency-domain, 10% key
-  // features. Aligned magnitude spectra (uOut/sOut are equal-length → same FFT
-  // size → directly comparable bins, unlike the bin-skipping Bode arrays).
-  const userMag = signalUtils.getMagnitudeSpectrum(uOut);
-  const goldMag = signalUtils.getMagnitudeSpectrum(sOut);
-  const dtDecimated = effectiveRate > 0 ? 1 / effectiveRate : 1;
-  const hybrid = gradingUtils.calculateHybridError({
-    user: uOut, golden: sOut, userSpectrum: userMag, goldenSpectrum: goldMag, dt: dtDecimated,
-  });
-
-  // Headroom for the error the decimation itself injects into the reference
-  // (computed + stored at publish time). 0 for legacy/undecimated goldens, so
-  // the pass decision is identical to a plain hybrid grade there.
-  const decimationTolerance = Number(solutionDoc.decimationError) || 0;
-  const effectiveError = Math.max(0, hybrid.error - decimationTolerance);
-
-  const verdict = gradingUtils.getVerdict(effectiveError, topics, false);
-  const testResult = {
-    type: "analog",
-    isSignalOnly: testType === "signal",
-    resistance: activeResistance,
-    timeLabels: labels,
-    userData: uOut,
-    solutionData: sOut,
-    verdict: {
-      ...verdict,
-      // nrmse kept for back-compat with the existing Results UI; the hybrid
-      // breakdown is exposed alongside for richer feedback.
-      nrmse: hybrid.timeError,
-      hybridError: hybrid.error,
-      effectiveError,
-      decimationTolerance,
-      components: {
-        time: hybrid.timeError,
-        freq: hybrid.freqError,
-        feature: hybrid.featureError,
-        weights: gradingUtils.HYBRID_WEIGHTS,
-      },
-    },
-    freqLabels: targetBode.freq,
-    // getFrequencyData skips near-zero bins per call, so the user's and the
-    // golden's freq arrays can differ — each series must carry its own x-axis.
-    userFreqLabels: userBode.freq,
-    userSpectrum: userBode.outputSpectrum,
-    solutionSpectrum: targetBode.outputSpectrum,
-    userBodeMag: userBode.bodeMag,
-    userBodePhase: userBode.bodePhase,
-    solutionBodeMag: targetBode.bodeMag,
-    solutionBodePhase: targetBode.bodePhase,
-  };
-  return { ok: true, testResult, passed: !!verdict.passed };
-}
-
 // Persist UserProgress for the newly-passed test keys via the Admin SDK (uid
 // from the verified token only). Merges with any existing progress and returns
 // whether the problem is now fully complete. Writes once per call — the batch
@@ -360,6 +207,14 @@ export async function POST(request) {
     // Engine discriminator, orthogonal to testType — absent on every problem
     // created before this field existed, so default to the original engine.
     const simulatorType = problem.simulatorType || "circuitjs";
+    const sim = getSimulator(simulatorType);
+    if (!sim) {
+      console.error(`[grade] Problem ${problemId} has unknown simulatorType "${simulatorType}"`);
+      return NextResponse.json(
+        { error: "Problem is misconfigured (unknown simulator). Contact the problem creator." },
+        { status: 500 }
+      );
+    }
 
     if (!["load", "signal", "digital"].includes(testType)) {
       console.error(`[grade] Problem ${problemId} has invalid testType "${testType}"`);
@@ -372,7 +227,7 @@ export async function POST(request) {
     // ── Batch path: one body grades all three load captures, one problem-doc
     // lookup, one UserProgress write, one rate-limit hit. ──
     if (isBatch) {
-      if (testType !== "load") {
+      if (testType !== "load" || !["circuitjs", "trace"].includes(sim.grade)) {
         return NextResponse.json(
           { error: "Batched grading is only supported for load problems." },
           { status: 400 }
@@ -404,9 +259,9 @@ export async function POST(request) {
       const errors = {};
       const passedKeys = [];
       for (const k of keys) {
-        const res = gradeAnalogCapture({
-          problem, testType, testbench, topics, solutionsMap, testKey: k, capturedData: body.captures[k],
-        });
+        const res = sim.grade === "trace"
+          ? gradeContinuousCapture({ problem, testType, testbench, topics, solutionsMap, testKey: k, capture: body.captures[k] })
+          : gradeAnalogCapture({ problem, testType, testbench, topics, solutionsMap, testKey: k, capturedData: body.captures[k] });
         if (res.ok) {
           testResults[k] = res.testResult;
           if (res.passed) passedKeys.push(k);
@@ -421,7 +276,19 @@ export async function POST(request) {
     // ── Single-test path (signal/digital, or one load tab). ──
     let testResult;
 
-    if (simulatorType !== "circuitjs") {
+    if (sim.grade === "resim" || sim.grade === "trace") {
+      // fulgurlab (re-simulated here) and fulgurspice (trace from the browser):
+      // waveform match or spec checks, by testbench.criteria.
+      let capture = capturedData;
+      if (sim.grade === "resim") {
+        const r = await resimulateFulgurlab({ problem, testbench, capturedData });
+        if (!r.ok) return NextResponse.json({ error: r.error }, { status: r.status });
+        capture = r.capture;
+      }
+      const res = gradeContinuousCapture({ problem, testType, testbench, topics, solutionsMap, testKey, capture });
+      if (!res.ok) return NextResponse.json({ error: res.error }, { status: res.status });
+      testResult = { ...res.testResult, simulatorType };
+    } else if (sim.grade === "sequence") {
       // FPGA/MCU: exact-sequence grading of one named signal/pin, extracted
       // client-side (inside the embedded sim, before the postMessage bridge
       // sent it here) from a VCD or pin trace. testType stays "signal" for

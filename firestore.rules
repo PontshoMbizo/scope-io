@@ -24,6 +24,14 @@ service cloud.firestore {
         allow read: if true;
         allow create, update, delete: if isOwnerOfProblem(problemId) || isAdmin();
       }
+
+      // Reference designs (fulgurlab / fulgurspice). Never client-readable:
+      // /api/grade re-simulates submitted fulgurlab diagrams, so a readable
+      // reference would be a copy-paste answer. The Admin SDK reads it.
+      match /private/{docId} {
+        allow read: if false;
+        allow create, update, delete: if isOwnerOfProblem(problemId) || isAdmin();
+      }
     }
 
     // ── Users ─────────────────────────────────────────────────────────────

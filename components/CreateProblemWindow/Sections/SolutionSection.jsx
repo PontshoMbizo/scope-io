@@ -3,18 +3,37 @@
 import { useState } from "react";
 import Simulator from "@/components/Simulator";
 import SimulatorEmbed from "@/components/SimulatorEmbed";
-import { EMBED_CONFIG } from "@/lib/embedConfig";
+import { bridgeConfig, buildContinuousTestbench, embedProps, isContinuousSim, isEmbeddedSim } from "@/lib/simulators";
 import { encodeWaveform, decimate, computeDecimation } from "@/lib/waveformCodec";
 import { gradingUtils } from "@/lib/gradingUtils";
+import { goldensFromRun, goldensReady } from "@/lib/goldenCapture";
+import ContinuousConfig from "./ContinuousConfig";
 
 export default function SolutionSection({ problem, updateProblem }) {
   const [activeTest, setActiveTest] = useState("test1");
   const [statusMessage, setStatusMessage] = useState(null); // { type, text }
   const problemType = problem.testType || "load";
-  const isEmbedded = problem.simulatorType && problem.simulatorType !== "circuitjs";
+  const isEmbedded = isEmbeddedSim(problem.simulatorType);
+  // fulgurlab / fulgurspice: continuous traces, graded by waveform match or spec
+  const isContinuous = isContinuousSim(problem.simulatorType);
+  const continuousBench = isContinuous
+    ? buildContinuousTestbench(problem.simulatorType, problemType, problem.testConfig, problem.starterCode)
+    : null;
 
   const handleBenchChange = (key, value) => {
     updateProblem({ testConfig: { ...problem.testConfig, [key]: value } });
+  };
+
+  // fulgurlab / fulgurspice golden: the reference run's traces (packed like
+  // CircuitJS goldens) plus the reference design, checked against the spec.
+  const handleContinuousResult = (payload) => {
+    const r = goldensFromRun({ simulatorType: problem.simulatorType, testType: problemType, testConfig: problem.testConfig, payload });
+    if (!r.ok) {
+      setStatusMessage({ type: "error", text: r.error });
+      return;
+    }
+    updateProblem({ goldens: r.goldens, referenceCode: r.referenceCode });
+    setStatusMessage({ type: "success", text: r.summary });
   };
 
   // fpga/mcu golden: store the run verbatim ({code, changes}) — no
@@ -128,7 +147,7 @@ export default function SolutionSection({ problem, updateProblem }) {
       <div className={`w-[70%] h-full ${isEmbedded ? "bg-white" : "bg-[#070707]"}`}>
         {isEmbedded ? (
           <SimulatorEmbed
-            {...EMBED_CONFIG[problem.simulatorType]}
+            {...embedProps(problem.simulatorType)}
             bridge={{
               mode: "capture",
               starterCode: problem.starterCode || "",
@@ -136,7 +155,8 @@ export default function SolutionSection({ problem, updateProblem }) {
               engine: problem.testConfig?.engine,
               signal: problem.testConfig?.signal,
               duration: problem.testConfig?.duration,
-              onResult: handleEmbedResult,
+              config: isContinuous ? bridgeConfig(problem.simulatorType, "capture", problemType, continuousBench) : undefined,
+              onResult: isContinuous ? handleContinuousResult : handleEmbedResult,
             }}
           />
         ) : (
@@ -158,8 +178,10 @@ export default function SolutionSection({ problem, updateProblem }) {
           <h2 className="text-2xl font-black uppercase tracking-tighter text-blue-600">Solution Suite</h2>
         </div>
 
+        {isContinuous && <ContinuousConfig problem={problem} updateProblem={updateProblem} />}
+
         {/* Testbench config — embedded sims (fpga/mcu) */}
-        {isEmbedded && (
+        {isEmbedded && !isContinuous && (
           <div className="p-4 bg-white border border-slate-200 rounded-2xl shadow-sm space-y-3">
             <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
               {problem.simulatorType === "fpga" ? "Testbench" : "Engine"}
@@ -245,7 +267,16 @@ export default function SolutionSection({ problem, updateProblem }) {
         )}
 
         {/* Per-test progress */}
-        {problemType !== "signal" ? (
+        {isContinuous ? (
+          <div className="p-4 bg-white border border-slate-200 rounded-2xl shadow-sm">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Reference Run</p>
+            <p className="text-sm font-bold text-slate-700">
+              {goldensReady(problem)
+                ? `Captured ✓${problemType === "load" ? " (all three loads)" : ""}`
+                : "Awaiting capture…"}
+            </p>
+          </div>
+        ) : problemType !== "signal" ? (
           <div className="inline-flex p-1 rounded-xl bg-slate-200 gap-0.5">
             {loadTabs.map((t) => {
               const done = !!problem.solutions[t.id];
@@ -277,7 +308,8 @@ export default function SolutionSection({ problem, updateProblem }) {
           <div className="flex items-start gap-3">
             <div className="h-2 w-2 rounded-full bg-amber-400 mt-1 shrink-0" />
             <p className="text-[11px] leading-relaxed text-slate-500 font-medium italic">
-              {isEmbedded && 'Set the signal/pin name above, write the reference solution, then click "Capture golden" in the simulator.'}
+              {isContinuous && 'Set up grading above, build your reference solution on the starter, then click "Capture golden" in the simulator. Changing the grading setup asks for a new capture.'}
+              {isEmbedded && !isContinuous && 'Set the signal/pin name above, write the reference solution, then click "Capture golden" in the simulator.'}
               {!isEmbedded && problemType === "digital" && "Paste the payload above into the simulator SRAM, click RESET, then SUBMIT."}
               {!isEmbedded && problemType === "load" && 'Set Max/Min loads above and label the output voltmeter "output". One SUBMIT captures all three loads.'}
               {!isEmbedded && problemType === "signal" && "Capture the gold-standard output for this circuit."}

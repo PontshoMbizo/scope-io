@@ -3,7 +3,7 @@
 import Simulator from "@/components/Simulator";
 import SimulatorEmbed from "@/components/SimulatorEmbed";
 import AutoMarker from "@/components/SimulationWindow/AutoMarker/AutoMarker.jsx";
-import { EMBED_CONFIG } from "@/lib/embedConfig";
+import { bridgeConfig, captureFromPayload, embedProps, isEmbeddedSim } from "@/lib/simulators";
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
 
@@ -13,7 +13,7 @@ export default function SolveProblem({ circuit, topics = [], testbench, testType
   const [isCompleted, setIsCompleted] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
 
-  const isEmbedded = simulatorType !== "circuitjs";
+  const isEmbedded = isEmbeddedSim(simulatorType);
 
   const [activeTestTab, setActiveTestTab] = useState("test1");
   const [testSuite, setTestSuite] = useState({ test1: null, test2: null, test3: null });
@@ -40,16 +40,23 @@ export default function SolveProblem({ circuit, topics = [], testbench, testType
     setSimResults(data);
   };
 
-  // Embedded-sim (fpga/mcu) submit: the sim posts back {code, ok, log, changes,
-  // raw}. Persist the code as the draft, then hand the payload straight to
-  // AutoMarker — it already knows (via `ok === false`) to show the log instead
-  // of grading.
+  // Embedded-sim submit: the sim posts back {code, ok, log, …}. Persist the
+  // code as the draft, then hand AutoMarker the capture in the shape it grades
+  // (captureFromPayload: fpga/mcu unchanged, fulgurlab's diagram, fulgurspice's
+  // traces or load sweep). `ok === false` makes AutoMarker show the log instead.
   const handleEmbedResult = useCallback((payload) => {
     if (payload?.code) {
       setCurrentCircuit(payload.code);
       localStorage.setItem(`draft_${problemId}`, payload.code);
     }
-    setSimResults(payload);
+    setSimResults(captureFromPayload(simulatorType, payload, testType));
+  }, [problemId, simulatorType, testType]);
+
+  // Protocol-2 sims send their code as the user edits: keep it as the draft so
+  // a refresh doesn't lose work done since the last Submit. Only storage — the
+  // running sim already has it, and re-seeding it would be a no-op anyway.
+  const handleEmbedChange = useCallback((code) => {
+    try { localStorage.setItem(`draft_${problemId}`, code); } catch { /* storage full or blocked */ }
   }, [problemId]);
 
   const confirmReset = () => {
@@ -144,7 +151,7 @@ export default function SolveProblem({ circuit, topics = [], testbench, testType
         <div className={`relative h-full ${simResults ? "hidden" : ""}`}>
           <SimulatorEmbed
             key={`${problemId}-${resetKey}`}
-            {...EMBED_CONFIG[simulatorType]}
+            {...embedProps(simulatorType)}
             bridge={{
               mode: "solve",
               starterCode: currentCircuit,
@@ -152,7 +159,9 @@ export default function SolveProblem({ circuit, topics = [], testbench, testType
               engine: testbench?.engine,
               signal: testbench?.signal,
               duration: testbench?.duration,
+              config: bridgeConfig(simulatorType, "solve", testType, testbench),
               onResult: handleEmbedResult,
+              onChange: handleEmbedChange,
             }}
           />
         </div>

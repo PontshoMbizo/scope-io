@@ -11,6 +11,11 @@ phase; see "Roadmap" below.)
 |---|---|---|---|---|
 | `/tools/fpga` | **fpgasim** | Tang Nano 9K | Verilog → Icarus Verilog | `PontshoMbizo/fpgasim` |
 | `/tools/mcu`  | **mcusim** | STM32 Blue Pill | bare-metal C → arm-none-eabi-gcc + QEMU | `PontshoMbizo/mcusim` |
+| `/tools/blocks` | **fulgurlab** | — | block diagrams → Scilab/Xcos | `PontshoMbizo/fulgurlab` |
+| `/tools/spice` | **fulgurspice** | — | schematics → ngspice (WebAssembly, in the browser) | `PontshoMbizo/fulgurspice` |
+
+All four are also graded problem types. fulgurlab and fulgurspice are covered in
+[FULGUR-SIMULATORS.md](FULGUR-SIMULATORS.md).
 
 `/tools` is the hub that links to both.
 
@@ -38,6 +43,8 @@ Set the deployed simulator URLs (see `.env.example`):
 ```
 NEXT_PUBLIC_NIKA_URL=   # FPGA / Verilog app  (e.g. http://localhost:3001 in dev)
 NEXT_PUBLIC_STM_URL=    # MCU / C app         (e.g. http://localhost:3002 in dev)
+NEXT_PUBLIC_FULGURLAB_URL=    # block diagrams (e.g. http://localhost:5173 in dev)
+NEXT_PUBLIC_FULGURSPICE_URL=  # SPICE circuits (e.g. http://localhost:5174 in dev)
 ```
 
 Unset → the tool page shows a "not configured" state instead of a broken iframe.

@@ -9,6 +9,17 @@ these rules, and tell solvers about any problem-specific labels in the descripti
 Source of truth: `lib/samplingUtils.js` (capture) and `components/Simulator.jsx`
 (digital discovery). If you change discovery logic there, update this doc.
 
+fulgurlab (block diagrams) and fulgurspice (SPICE schematics) problems have no labelling
+conventions to memorise: Creator Studio asks for the graded scope or net and checks the starter.
+See [FULGUR-SIMULATORS.md](FULGUR-SIMULATORS.md). In short:
+- **fulgurlab:** lock the plant, sources and the graded Scope (select a block, then tick *Locked*);
+  the stop time and sample step you save are fixed for the learner and the grader.
+- **fulgurspice:** put a net label (e.g. `out`) on the graded wire and lock the source and load.
+  For load problems the load resistor's value is `{RLOAD}`. Use a transient analysis for waveform
+  match, or AC with spec checks.
+
+The rest of this page is about the **legacy CircuitJS** strategies.
+
 ---
 
 ## Analog problems (`testType: "load"` or `"signal"`)

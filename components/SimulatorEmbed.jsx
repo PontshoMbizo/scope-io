@@ -24,8 +24,17 @@ import { ArrowLeft, ExternalLink, AlertTriangle } from "lucide-react";
  * @param {string} title           human label shown in the header strip
  * @param {string} [envVar]        name of the env var to set, shown in the empty state
  * @param {string} [accent]        tailwind text colour class for the title accent
- * @param {object} [bridge]        { mode: "export"|"capture"|"solve", starterCode, testbench?, engine?, signal?, duration?, onResult }
+ * Protocol 2 (fulgurlab, fulgurspice) adds a sim-specific `config` object to
+ * init (locked analysis / settings, probes, load sweep, theme) and a debounced
+ * `scopeio:change {code}` message the sim sends while the user edits, so the
+ * host can keep a draft between submits. Older sims ignore `config` and never
+ * send `change`.
+ *
+ * @param {object} [bridge]        { mode: "export"|"capture"|"solve", starterCode, testbench?, engine?, signal?, duration?, config?, onResult, onChange? }
  */
+// Drafts live in localStorage (about 5 MB per origin); ignore anything bigger.
+const MAX_DRAFT_CHARS = 2_000_000;
+
 export default function SimulatorEmbed({ src, title, envVar, accent = "text-cyan-600", bridge, hideHeader }) {
   const [loaded, setLoaded] = useState(false);
   const iframeRef = useRef(null);
@@ -60,6 +69,8 @@ export default function SimulatorEmbed({ src, title, envVar, accent = "text-cyan
           engine: b.engine,
           signal: b.signal,
           duration: b.duration,
+          protocol: 2,
+          config: b.config,
         },
         simOrigin
       );
@@ -79,6 +90,11 @@ export default function SimulatorEmbed({ src, title, envVar, accent = "text-cyan
         postInit();
         return;
       }
+      if (event.data?.type === "scopeio:change") {
+        const code = event.data.code;
+        if (typeof code === "string" && code.length <= MAX_DRAFT_CHARS) bridgeRef.current?.onChange?.(code);
+        return;
+      }
       if (event.data?.type !== "scopeio:result") return;
       bridgeRef.current?.onResult?.(event.data.payload);
     }
@@ -86,6 +102,17 @@ export default function SimulatorEmbed({ src, title, envVar, accent = "text-cyan
     return () => window.removeEventListener("message", handleMessage);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [simOrigin, !!bridge]);
+
+  // Protocol-2 sims take a fresh init as a settings update (they never re-seed
+  // the code), so re-send it when the config changes — e.g. a creator editing
+  // the load values or the graded net while the sim is open.
+  const configKey = JSON.stringify(bridge?.config ?? null);
+  const firstConfig = useRef(true);
+  useEffect(() => {
+    if (firstConfig.current) { firstConfig.current = false; return; }
+    postInit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configKey]);
 
   function handleLoad() {
     setLoaded(true);

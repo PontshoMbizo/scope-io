@@ -22,8 +22,17 @@ ChartJS.register(
   PointElement, LineElement, Title, Tooltip, Legend, zoomPlugin
 );
 
+// A measured value for the spec table: 4 significant figures, then the unit.
+const fmtValue = (v, unit) => (v === null || v === undefined || !Number.isFinite(Number(v))
+  ? "—"
+  : `${Number(Number(v).toPrecision(4))}${unit ? ` ${unit}` : ""}`);
+const paramText = (params = {}) => Object.entries(params)
+  .filter(([, v]) => v !== undefined && v !== null && v !== "")
+  .map(([k, v]) => `${k} = ${v}`).join(", ");
+
 export default function Results({ chartData }) {
-  const [activeTab, setActiveTab] = useState(chartData.type === "digital" ? "logic" : "time");
+  const isSpec = chartData.type === "spec";
+  const [activeTab, setActiveTab] = useState(chartData.type === "digital" ? "logic" : isSpec ? "checks" : "time");
   const { passed, score, message, nrmse } = chartData.verdict || {};
 
   const isLoadTest = chartData.type === "analog" && !chartData.isSignalOnly;
@@ -87,10 +96,10 @@ export default function Results({ chartData }) {
   const timeData = useMemo(() => ({
     labels: chartData.timeLabels,
     datasets: [
-      { label: "Expected Voltage", data: chartData.solutionData, borderColor: "#3b82f644", borderDash: [5,5], pointRadius: 0 },
+      { label: isSpec ? "Reference (not graded)" : "Expected Voltage", data: chartData.solutionData || [], borderColor: "#3b82f644", borderDash: [5,5], pointRadius: 0 },
       { label: "Your Voltage", data: chartData.userData, borderColor: "#22c55e", pointRadius: 0, borderWidth: 2.5 }
     ]
-  }), [chartData.timeLabels, chartData.solutionData, chartData.userData]);
+  }), [chartData.timeLabels, chartData.solutionData, chartData.userData, isSpec]);
 
   const currentData = useMemo(() => ({
     labels: chartData.timeLabels,
@@ -142,7 +151,14 @@ export default function Results({ chartData }) {
 
       {/* TABS */}
       <div className="tabs tabs-boxed justify-center bg-base-200 gap-2 p-1">
-        {chartData.type === "digital" ? (
+        {isSpec ? (
+          <>
+            <button className={`tab transition-all ${activeTab === "checks" ? "tab-active" : ""}`} onClick={() => setActiveTab("checks")}>Checks</button>
+            {chartData.domain === "ac"
+              ? <button className={`tab transition-all ${activeTab === "bode" ? "tab-active" : ""}`} onClick={() => setActiveTab("bode")}>Bode Plot</button>
+              : <button className={`tab transition-all ${activeTab === "time" ? "tab-active" : ""}`} onClick={() => setActiveTab("time")}>Time Domain</button>}
+          </>
+        ) : chartData.type === "digital" ? (
           <>
             <button className={`tab transition-all ${activeTab === "logic" ? "tab-active" : ""}`} onClick={() => setActiveTab("logic")}>Logic Analyzer</button>
             <button className={`tab transition-all ${activeTab === "table" ? "tab-active" : ""}`} onClick={() => setActiveTab("table")}>Truth Table</button>
@@ -157,7 +173,30 @@ export default function Results({ chartData }) {
       </div>
 
       <div className="space-y-6 animate-in fade-in duration-300">
-        <div className={`${activeTab === "bode" || (activeTab === "time" && isLoadTest) ? "h-[650px]" : "h-[450px]"} bg-white p-4 border rounded-xl shadow-sm`}>
+        <div className={`${activeTab === "bode" || (activeTab === "time" && isLoadTest) ? "h-[650px]" : activeTab === "checks" ? "" : "h-[450px]"} bg-white p-4 border rounded-xl shadow-sm`}>
+
+          {activeTab === "checks" && isSpec && (
+            <table className="table w-full text-sm">
+              <thead>
+                <tr className="text-[10px] font-black uppercase tracking-widest text-gray-400">
+                  <th>Check</th><th>Target</th><th>Yours</th><th className="text-center">Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {chartData.checks.map((c, i) => (
+                  <tr key={i}>
+                    <td>
+                      <span className="font-bold">{c.label}</span>
+                      {paramText(c.params) && <span className="block text-[11px] text-gray-400 font-mono">{paramText(c.params)}</span>}
+                    </td>
+                    <td className="font-mono">{c.op === "≈" ? `${fmtValue(c.value, c.unit)} ± ${fmtValue(c.tol, "")}` : `${c.op === "<=" ? "≤" : "≥"} ${fmtValue(c.value, c.unit)}`}</td>
+                    <td className={`font-mono font-bold ${c.passed ? "text-green-600" : "text-red-600"}`}>{c.actual === null ? "not found" : fmtValue(c.actual, c.unit)}</td>
+                    <td className="text-center">{c.passed ? "✅" : "❌"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
 
           {activeTab === "logic" && <Line options={makeOptions("category", "Clock Cycle", "Decimal Value")} data={logicData} />}
 
@@ -181,7 +220,7 @@ export default function Results({ chartData }) {
             </div>
           )}
 
-          {activeTab === "time" && chartData.type === "analog" && (
+          {activeTab === "time" && (chartData.type === "analog" || isSpec) && (
             <div className="flex flex-col h-full gap-4">
               <div className="flex-1">
                 <Line options={makeOptions("category", "Time (ms)", "Voltage (V)")} data={timeData} />
