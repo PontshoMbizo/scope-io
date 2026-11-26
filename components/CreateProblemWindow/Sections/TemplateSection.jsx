@@ -3,7 +3,8 @@
 import { CheckCircle2 } from "lucide-react";
 import Simulator from "@/components/Simulator";
 import SimulatorEmbed from "@/components/SimulatorEmbed";
-import { EMBED_CONFIG } from "@/lib/embedConfig";
+import { bridgeConfig, embedProps, isEmbeddedSim } from "@/lib/simulators";
+import { strategyId } from "./StrategySection";
 
 // Per-strategy labelling conventions the captured circuit must follow
 // (see docs/CREATOR-CONVENTIONS.md).
@@ -13,12 +14,34 @@ const CONVENTIONS = {
   digital: ['A "square wave gen" acts as the clock', 'Label a node "clk"', 'Output bus nodes "Output0", "Output1", … (LSB first)'],
   fpga: ['Write the starter Verilog module (can be an incomplete stub)', 'Click "Save starter" — no need to compile first'],
   mcu: ['Write the starter firmware (can be an incomplete stub)', 'Click "Save starter" — no need to build first'],
+  control: [
+    'Draw what the learner starts from: source, plant, a Scope for the response (leave the controller to them)',
+    'Select a block and tick "Locked" in Properties for everything the learner must not change — at least the plant and the graded Scope',
+    "Set the stop time and sample step now: they are fixed for the learner and the grader",
+    'Click "Save starter"',
+  ],
+  "spice-signal": [
+    'Put a net label (e.g. "out") on the wire you will grade, and optionally "in" on the input',
+    'Tick "Locked for learners" on parts they must keep (source, load)',
+    "Set the analysis now (transient for waveform match; AC for −3 dB / gain checks): learners can't change it",
+    'Click "Save starter"',
+  ],
+  "spice-load": [
+    'Draw the load as a resistor with value {RLOAD} and tick "Locked for learners"',
+    'Put a net label (e.g. "out") on the output wire',
+    "Use a transient analysis; to try it here, add .param RLOAD=1k under SPICE directives",
+    'Click "Save starter"',
+  ],
 };
+
+const hasLoadParam = (code) => /\{\s*rload\s*\}/i.test(code || "");
 
 export default function TemplateSection({ problem, updateProblem }) {
   const type = problem.testType || "load";
-  const isEmbedded = problem.simulatorType && problem.simulatorType !== "circuitjs";
+  const isEmbedded = isEmbeddedSim(problem.simulatorType);
   const captured = isEmbedded ? !!problem.starterCode : !!problem.templateCircuit;
+  const conventionKey = isEmbedded ? strategyId(problem) : type;
+  const missingLoad = strategyId(problem) === "spice-load" && captured && !hasLoadParam(problem.starterCode);
 
   const handleCapture = (_data, sim) => {
     if (!sim) return;
@@ -31,11 +54,13 @@ export default function TemplateSection({ problem, updateProblem }) {
       <div className={`w-[70%] h-full ${isEmbedded ? "bg-white" : "bg-[#070707]"}`}>
         {isEmbedded ? (
           <SimulatorEmbed
-            {...EMBED_CONFIG[problem.simulatorType]}
+            {...embedProps(problem.simulatorType)}
             bridge={{
               mode: "export",
               starterCode: problem.starterCode || "",
-              onResult: (r) => updateProblem({ starterCode: r.code }),
+              config: bridgeConfig(problem.simulatorType, "export", type, {}),
+              // A new starter invalidates any golden captured against the old one.
+              onResult: (r) => r?.code && updateProblem({ starterCode: r.code, solutions: {}, goldens: {}, referenceCode: "" }),
             }}
           />
         ) : (
@@ -70,11 +95,17 @@ export default function TemplateSection({ problem, updateProblem }) {
           )}
         </div>
 
+        {missingLoad && (
+          <div className="px-4 py-3 rounded-xl text-xs font-bold bg-red-50 text-red-600 border border-red-200">
+            No part uses {"{RLOAD}"}: give the load resistor the value {"{RLOAD}"} so each test can set it.
+          </div>
+        )}
+
         {/* Conventions hint */}
         <div className="p-5 bg-white border border-slate-200 rounded-2xl shadow-sm space-y-2">
-          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Labelling — {isEmbedded ? problem.simulatorType : type}</p>
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Labelling — {conventionKey}</p>
           <ul className="space-y-1.5">
-            {CONVENTIONS[isEmbedded ? problem.simulatorType : type].map((c, i) => (
+            {CONVENTIONS[conventionKey].map((c, i) => (
               <li key={i} className="flex items-start gap-2 text-[11px] text-slate-500 leading-relaxed">
                 <span className="h-1.5 w-1.5 rounded-full bg-amber-400 mt-1.5 shrink-0" />
                 <span>{c}</span>

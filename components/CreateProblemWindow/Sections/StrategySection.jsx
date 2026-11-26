@@ -1,15 +1,47 @@
 "use client";
 
-import { Zap, Activity, Binary, CircuitBoard, Cpu } from "lucide-react";
+import { Zap, Activity, Binary, CircuitBoard, Cpu, Workflow, Waves, Gauge } from "lucide-react";
 
+// fulgurspice replaces CircuitJS for new analog problems; the CircuitJS load and
+// signal strategies stay (marked Legacy) for problems written against it.
 const STRATEGIES = [
+  {
+    id: "spice-signal",
+    testType: "signal",
+    simulatorType: "fulgurspice",
+    icon: Waves,
+    label: "Circuit Signal",
+    tag: "Analog · SPICE",
+    desc: "The learner draws a schematic and runs it in ngspice. Grade one net's waveform against your reference, or check specs such as rise time or the −3 dB frequency.",
+    needs: 'A net label on the graded wire ("out") · fulgurspice',
+  },
+  {
+    id: "spice-load",
+    testType: "load",
+    simulatorType: "fulgurspice",
+    icon: Gauge,
+    label: "Circuit Load Test",
+    tag: "Power · SPICE",
+    desc: "Runs the circuit at three load resistances (No-load / Max / Min) in one Submit and grades each run.",
+    needs: 'A locked load resistor with value {RLOAD} · fulgurspice',
+  },
+  {
+    id: "control",
+    testType: "signal",
+    simulatorType: "fulgurlab",
+    icon: Workflow,
+    label: "Control System",
+    tag: "Blocks · Scilab",
+    desc: "A Simulink-style block diagram. scope.io re-simulates the submitted diagram itself, then grades one scope trace against your reference or a spec (overshoot, settling time…).",
+    needs: "A locked plant and graded Scope · fulgurlab",
+  },
   {
     id: "load",
     testType: "load",
     simulatorType: "circuitjs",
     icon: Zap,
     label: "Load Test",
-    tag: "Analog / Power",
+    tag: "Legacy · CircuitJS",
     desc: "Grades the output voltage across three resistive loads (No-load / Max / Min). One Submit sweeps all three.",
     needs: 'Output voltmeter labelled "output"',
   },
@@ -19,7 +51,7 @@ const STRATEGIES = [
     simulatorType: "circuitjs",
     icon: Activity,
     label: "Signal Test",
-    tag: "Waveshaping / DSP",
+    tag: "Legacy · CircuitJS",
     desc: "Grades a single output waveform in the time and frequency domain. Best for filters, amplifiers and shaping.",
     needs: "One golden capture",
   },
@@ -62,23 +94,42 @@ const DEFAULT_CONFIG = {
   digital: { payload1: "", payload2: "", payload3: "" },
   fpga: { testbench: "", signal: "", duration: 2000000 },
   mcu: { engine: "mainline", signal: "" },
+  "spice-signal": { criteria: "waveform", output: "out", input: "in", spec: [] },
+  "spice-load": { criteria: "waveform", output: "out", input: "", noLoad: 1e12, rMax: 100, rMin: 10, spec: [] },
+  control: {
+    criteria: "spec",
+    scope: "",
+    input: 0,
+    spec: [
+      { metric: "overshootPct", op: "<=", value: 10 },
+      { metric: "settlingTime", op: "<=", value: 5, params: { band: 0.02 } },
+      { metric: "finalValue", op: "≈", value: 1, tol: 0.02 },
+    ],
+  },
 };
 
+/** The card a problem's (simulatorType, testType) pair selects. */
+export const strategyId = (p) =>
+  p.simulatorType === "fulgurspice" ? `spice-${p.testType}`
+    : p.simulatorType === "fulgurlab" ? "control"
+      : p.simulatorType && p.simulatorType !== "circuitjs" ? p.simulatorType
+        : p.testType;
+
 export default function StrategySection({ problem, updateProblem }) {
-  // Embedded sims (fpga/mcu) share testType:"signal" with the plain Signal
-  // Test strategy, so the selected card is keyed off simulatorType first.
-  const currentId = problem.simulatorType && problem.simulatorType !== "circuitjs"
-    ? problem.simulatorType
-    : problem.testType;
+  // Embedded sims share testType values with the CircuitJS strategies, so the
+  // selected card is keyed off simulatorType first.
+  const currentId = strategyId(problem);
 
   const choose = (s) => {
     if (s.id === currentId) return;
     updateProblem({
       testType: s.testType,
       simulatorType: s.simulatorType,
-      testConfig: DEFAULT_CONFIG[s.id],
+      testConfig: structuredClone(DEFAULT_CONFIG[s.id]),
       starterCode: "",
       templateCircuit: "",
+      goldens: {},
+      referenceCode: "",
       // Reset captures so a type switch can't carry stale solutions.
       solutions: {},
       captureRates: {},

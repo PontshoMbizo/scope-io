@@ -110,7 +110,8 @@ Prioritized; grounded in the current code. Pick any and I'll implement.
    pass for Input B while the sim still holds Input A's SRAM payload.
 25. **`isPublishing` never resets on successful publish** (`CreateProblem.jsx`) — relies on
    `router.push` navigating away; if navigation fails the button spins forever.
-26. **No live editor sync from embedded sims.** The draft (`draft_<id>` localStorage) only updates
+26. **No live editor sync from embedded sims.** *(fixed for fulgurlab and fulgurspice: protocol-2
+   `scopeio:change` drafts; fpgasim / mcusim still to adopt it)* The draft (`draft_<id>` localStorage) only updates
    when the sim posts a result (Submit). Edits made after the last run are lost on page refresh
    (back-nav is now safe — the iframe stays mounted). Optional protocol extension: a debounced
    `scopeio:code` message from the sims' editors.

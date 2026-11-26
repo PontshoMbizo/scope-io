@@ -96,6 +96,8 @@ The capture engine discovers instrumentation by convention. A problem that viola
 - **Firestore (server)**: privileged reads/writes go through `lib/firebaseAdmin.js` in API routes only.
 - **CircuitJS**: all simulator interaction goes through `components/Simulator.jsx` via direct `iframe.contentWindow.CircuitJS1` method calls (NOT postMessage). Treat the runtime as a black box; don't spread sim calls across components.
 - **New problem types** need a new grading branch in `app/api/grade/route.js` AND a capture path in `lib/samplingUtils.js`.
+- **Simulators** are registered in `lib/simulators.js` (`simulatorType` → how it is embedded and graded). Branch on `getSimulator(type).grade`, never on `simulatorType !== "circuitjs"`. fulgurlab is graded by re-simulating the submitted diagram on its server (`resimulateFulgurlab`, after `checkLocked`); fulgurspice posts traces. Both support waveform match or spec checks (`lib/specUtils.js`). See `docs/FULGUR-SIMULATORS.md`.
+- **New analog problems use fulgurspice.** The CircuitJS load/signal strategies are legacy; keep them working for existing problems.
 - **Env vars**: client config via `NEXT_PUBLIC_FIREBASE_*`; server secret via `FIREBASE_SERVICE_ACCOUNT_JSON`. Never hardcode or commit. See `.env.example`.
 
 ## Simulation gotchas
@@ -113,7 +115,7 @@ npm test                        # vitest
 ```
 Without the Admin SDK locally, grading still works but progress isn't persisted (logged as a warning) and tokens are decoded unverified (dev only).
 
-The `/tools` area embeds two externally-hosted simulators (FPGA + MCU) via iframe — set `NEXT_PUBLIC_NIKA_URL` / `NEXT_PUBLIC_STM_URL` to run them locally. See `docs/TOOLS.md`.
+The `/tools` area embeds four externally-hosted simulators (FPGA, MCU, fulgurlab blocks, fulgurspice circuits) via iframe: set `NEXT_PUBLIC_NIKA_URL` / `NEXT_PUBLIC_STM_URL` / `NEXT_PUBLIC_FULGURLAB_URL` / `NEXT_PUBLIC_FULGURSPICE_URL`. Grading fulgurlab problems also needs `FULGURLAB_API_URL` (+ `FULGURLAB_GRADER_TOKEN`). See `docs/TOOLS.md` and `docs/FULGUR-SIMULATORS.md`.
 
 ## Docs map
 - `UI.md` — design system / style guide; read before any UI work

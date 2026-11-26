@@ -15,6 +15,8 @@ export default function ProblemDescription({ problem }) {
   const boardBadge = {
     fpga: "FPGA · Tang Nano 9K",
     mcu: "MCU · STM32 Blue Pill",
+    fulgurlab: "Block diagram · fulgurlab",
+    fulgurspice: "SPICE · fulgurspice",
   }[problem.simulatorType];
 
   return (

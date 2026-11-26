@@ -8,6 +8,9 @@ import { db } from "@/lib/firebase";
 import { collection, doc, serverTimestamp, writeBatch } from "firebase/firestore";
 import { useAuth } from "@/components/Auth/AuthProvider.jsx";
 import { GeneralUtils } from "@/lib/GeneralUtils";
+import { buildContinuousTestbench, isContinuousSim, isEmbeddedSim, spiceAnalysisKind, starterTimeStep } from "@/lib/simulators";
+import { goldensReady } from "@/lib/goldenCapture";
+import { validateSpec } from "@/lib/specUtils";
 import WizardFooter from "./WizardFooter";
 import StrategySection from "./Sections/StrategySection";
 import DetailsSection from "./Sections/DetailsSection";
@@ -25,7 +28,29 @@ const STEPS = [
 
 const requiredTests = GeneralUtils.requiredTests;
 
-const isEmbeddedType = (p) => !!(p.simulatorType && p.simulatorType !== "circuitjs");
+const isEmbeddedType = (p) => isEmbeddedSim(p.simulatorType);
+
+// fulgurlab / fulgurspice: what the Template and Solution steps need, in one
+// place for the stepper, the footer hint and publish. Returns a hint or null.
+function continuousTemplateHint(p) {
+  if (!p.starterCode) return "Build the starter, then click Save starter";
+  if (p.simulatorType === "fulgurspice") {
+    const kind = spiceAnalysisKind(p.starterCode);
+    if (!["tran", "ac"].includes(kind)) return "Use a transient or AC analysis in the starter";
+    if (p.testType === "load" && !/\{\s*rload\s*\}/i.test(p.starterCode)) return "Give the load resistor the value {RLOAD}";
+  }
+  return null;
+}
+function continuousSolutionHint(p) {
+  const tc = p.testConfig || {};
+  if (p.simulatorType === "fulgurlab" && !tc.scope) return "Choose the scope to grade";
+  if (p.simulatorType === "fulgurspice" && !String(tc.output || "").trim()) return "Name the output net to grade";
+  if (p.testType === "load" && !(Number(tc.rMax) > 0 && Number(tc.rMin) > 0)) return "Set positive Max / Min loads";
+  if (tc.criteria === "spec" && validateSpec(tc.spec).length) return validateSpec(tc.spec)[0];
+  if (tc.criteria !== "spec" && p.simulatorType === "fulgurspice" && spiceAnalysisKind(p.starterCode) === "ac") return "Waveform match needs a transient analysis: use spec checks for AC";
+  if (!goldensReady(p)) return "Capture the reference run";
+  return null;
+}
 
 // Single source of truth for step gating: drives the stepper lock, the footer's
 // disabled Next, and its inline hint. Returns { valid, hint }.
@@ -40,6 +65,10 @@ export function stepValidity(step, p) {
       if (p.topics.length === 0) return { valid: false, hint: "Select at least one topic" };
       return { valid: true };
     case 2:
+      if (isContinuousSim(p.simulatorType)) {
+        const hint = continuousTemplateHint(p);
+        return hint ? { valid: false, hint } : { valid: true };
+      }
       if (isEmbeddedType(p)) {
         return p.starterCode
           ? { valid: true }
@@ -49,6 +78,10 @@ export function stepValidity(step, p) {
         ? { valid: true }
         : { valid: false, hint: "Design and Submit the starter circuit" };
     case 3: {
+      if (isContinuousSim(p.simulatorType)) {
+        const hint = continuousSolutionHint(p);
+        return hint ? { valid: false, hint } : { valid: true };
+      }
       if (isEmbeddedType(p)) {
         const ok = !!p.solutions?.test1?.changes?.length && !!p.testConfig?.signal?.trim();
         return ok ? { valid: true } : { valid: false, hint: "Set the signal/pin name and capture the golden run" };
@@ -60,6 +93,10 @@ export function stepValidity(step, p) {
       // Publish gating — everything finalizeProblem requires.
       if (!p.title.trim()) return { valid: false, hint: "Title is required" };
       if (p.topics.length === 0) return { valid: false, hint: "Add at least one topic" };
+      if (isContinuousSim(p.simulatorType)) {
+        const hint = continuousTemplateHint(p) || continuousSolutionHint(p);
+        return hint ? { valid: false, hint } : { valid: true };
+      }
       if (isEmbeddedType(p)) {
         if (!p.solutions?.test1?.changes?.length || !p.testConfig?.signal?.trim())
           return { valid: false, hint: "Set the signal/pin name and capture the golden run" };
@@ -96,6 +133,9 @@ export default function CreateProblem() {
     solutions: {},
     templateCircuit: "",
     starterCode: "",
+    // fulgurlab / fulgurspice: packed reference traces per test key, and the reference design
+    goldens: {},
+    referenceCode: "",
   });
 
   const updateProblem = (patch) => setProblem((prev) => ({ ...prev, ...patch }));
@@ -116,6 +156,10 @@ export default function CreateProblem() {
     setStatusMessage(null);
     if (!user) {
       setStatusMessage({ type: "error", text: "You must be signed in to publish." });
+      return;
+    }
+    if (isContinuousSim(problem.simulatorType)) {
+      await publishContinuous();
       return;
     }
 
@@ -221,6 +265,64 @@ export default function CreateProblem() {
         }
       }
 
+      await batch.commit();
+      setStatusMessage({ type: "success", text: "Challenge published!" });
+      setTimeout(() => router.push("/"), 1200);
+    } catch (e) {
+      console.error("Publishing Error:", e);
+      setStatusMessage({ type: "error", text: `Publishing failed: ${e.message}` });
+      setIsPublishing(false);
+    }
+  };
+
+  // fulgurlab / fulgurspice publish: the problem doc (with the starter and the
+  // testbench the grader reads), one golden doc per test key, and the reference
+  // design in a private doc — /api/grade re-simulates fulgurlab submissions, so
+  // a world-readable reference diagram would be a copyable answer.
+  const publishContinuous = async () => {
+    const check = stepValidity(4, problem);
+    if (!check.valid) {
+      setStatusMessage({ type: "error", text: check.hint });
+      return;
+    }
+    setIsPublishing(true);
+    try {
+      const testbench = buildContinuousTestbench(problem.simulatorType, problemType, problem.testConfig, problem.starterCode);
+      const keys = problemType === "load" ? ["test1", "test2", "test3"] : ["test1"];
+      const step = starterTimeStep(problem.simulatorType, problem.starterCode);
+      const problemRef = doc(collection(db, "Problems"));
+      const batch = writeBatch(db);
+      batch.set(problemRef, {
+        title: problem.title.trim(),
+        difficulty: problem.difficulty,
+        description: problem.description,
+        topics: problem.topics,
+        creatorId: user.uid,
+        creatorName: user.displayName || "Anonymous",
+        createdAt: serverTimestamp(),
+        testbench,
+        testType: problemType,
+        simulatorType: problem.simulatorType,
+        // the grid the reference ran on; the grader checks submissions against it
+        timeStep: step ? String(step) : problem.timeStep,
+        sampleCount: problem.goldens.test1?.length || 0,
+        starterCode: problem.starterCode,
+      });
+      batch.set(doc(db, "Problems", problemRef.id, "initialCircuit", "data"), { version: 1, payload: "" });
+      for (const key of keys) {
+        const g = problem.goldens[key];
+        batch.set(doc(db, "Problems", problemRef.id, "solutionWaveform", key), {
+          kind: `${problem.simulatorType}-${g.kind}`,
+          samples: g.samples,
+          sampleRate: g.sampleRate,
+          decimation: g.decimation,
+          decimationError: g.decimationError,
+        });
+      }
+      batch.set(doc(db, "Problems", problemRef.id, "private", "reference"), {
+        simulatorType: problem.simulatorType,
+        code: problem.referenceCode,
+      });
       await batch.commit();
       setStatusMessage({ type: "success", text: "Challenge published!" });
       setTimeout(() => router.push("/"), 1200);
